@@ -96,9 +96,16 @@ def main() -> int:
         if i % 10 == 0 or i == len(entries):
             print(f"  blobs {i}/{len(entries)}")
 
-    for path in DELETE:
+    # GitHub rejects sha:null for a path the base tree does not contain, so
+    # deletions are only emitted for files that are actually still there.
+    st, basetree = api("GET", f"/repos/{OWNER}/{REPO}/git/trees/{base_sha}?recursive=1")
+    remote_paths = {t["path"] for t in basetree.get("tree", []) if t["type"] == "blob"}
+    to_delete = [p for p in DELETE if p in remote_paths]
+    skipped = [p for p in DELETE if p not in remote_paths]
+    for path in to_delete:
         tree_items.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
-    print(f"树条目: {len(tree_items)}（含 {len(DELETE)} 个删除）")
+    print(f"树条目: {len(tree_items)}（删除 {len(to_delete)} 个"
+          + (f"，已不存在故跳过 {len(skipped)} 个" if skipped else "") + "）")
 
     st, tree = api("POST", f"/repos/{OWNER}/{REPO}/git/trees", {"base_tree": base_sha, "tree": tree_items})
     print(f"新 tree  : {tree['sha'][:8]}")
