@@ -274,10 +274,12 @@ async function showSetup() {
       <h4><span class="badge" style="--c:${platformColor(s.platform)}">${esc(s.platform)}</span>
           <code>${esc(s.skill_name)}</code>
           <span class="hint">· ${s.bytes} B ${s.dir_exists ? '' : '· 父目录不存在'}</span></h4>
+      ${s.raw_url ? `<p class="hint">安装地址（agent 自己抓）<br><code class="url">${esc(s.raw_url)}</code></p>` : ''}
       <p class="hint">装到 <code>${esc(s.target_dir)}</code></p>
       <div class="row-actions">
         <button class="primary" data-copy-skill-inst="${i}">复制「给 agent 的安装指令」</button>
-        <button class="ghost" data-copy-skill-raw="${i}">只复制 SKILL.md 原文</button>
+        ${s.raw_url ? `<button class="ghost" data-copy-skill-url="${i}">只复制地址</button>` : ''}
+        <button class="ghost" data-copy-skill-raw="${i}">复制原文（离线兜底）</button>
         <button class="ghost" data-view-skill="${i}">看内容</button>
       </div>
     </section>`).join('');
@@ -532,6 +534,12 @@ document.addEventListener('click', async (e) => {
   if (cs && state.setup) {
     const s = state.setup.skills[+cs.dataset.copySkillInst];
     toast((await copyText(s.instruction)) ? `${s.platform} 安装指令已复制，去粘给那个 agent` : '复制失败', true);
+    return;
+  }
+  const cu = e.target.closest('[data-copy-skill-url]');
+  if (cu && state.setup) {
+    const s = state.setup.skills[+cu.dataset.copySkillUrl];
+    toast((await copyText(s.raw_url)) ? `${s.platform} 安装地址已复制` : '复制失败', true);
     return;
   }
   const cr = e.target.closest('[data-copy-skill-raw]');

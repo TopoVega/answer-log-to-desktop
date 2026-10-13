@@ -174,6 +174,7 @@ button.warn { color: var(--warn); }
 button.danger { color: var(--bad); }
 
 .right { margin-left: auto; }
+code.url { font-family: var(--mono); font-size: 10px; color: #9ecbff; word-break: break-all; line-height: 1.7; }
 .warnTag { font-size: 10px; color: var(--warn); margin-left: 6px; }
 .chk { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--warn); margin: 6px 0 2px; }
 .filelist { margin: 4px 0 10px; padding-left: 18px; max-height: 220px; overflow-y: auto; }

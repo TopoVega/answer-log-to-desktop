@@ -849,6 +849,15 @@ check("workbuddy installs to .workbuddy/skills",
       str(by_plat))
 check("skills discovered dynamically from adapters/",
       all((ROOT / "adapters" / k["platform"] / "SKILL.md").is_file() for k in skills))
+check("every skill exposes a raw install URL",
+      all(k["raw_url"].startswith("https://raw.githubusercontent.com/") and k["raw_url"].endswith("/SKILL.md")
+          for k in skills), str([k["raw_url"][:40] for k in skills]))
+check("URL embeds the platform so skills do not collide",
+      all(f"/adapters/{k['platform']}/SKILL.md" in k["raw_url"] for k in skills))
+check("instruction leads with the URL but keeps the offline copy",
+      all(k["raw_url"] in k["instruction"] and k["text"] in k["instruction"] for k in skills))
+check("instruction states the expected byte count for verification",
+      all(str(k["bytes"]) in k["instruction"] for k in skills))
 server.stop(httpd5)
 
 print("\n== UTF-8 stdout (the bug that broke the original) ==")

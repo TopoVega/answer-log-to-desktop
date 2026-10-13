@@ -14,6 +14,7 @@ steps rather than left as folklore:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -71,6 +72,9 @@ def http_curl(port: int) -> str:
     )
 
 
+# Where this project is published; overridable so a fork shows its own URLs.
+REPO_SLUG = os.environ.get("AGENT_WORKBENCH_REPO_SLUG", "TopoVega/answer-log-to-desktop")
+
 SKILL_DIRS = {
     "workbuddy": ("answer-log-to-workbench", ".workbuddy/skills"),
     "qoder": ("agent-workbench", ".qoder-cn/skills"),
@@ -98,6 +102,14 @@ def skill_targets() -> list[dict]:
     return out
 
 
+def raw_url(platform: str) -> str:
+    """Public install URL for a platform's skill, if it is published."""
+    slug = REPO_SLUG
+    if not slug:
+        return ""
+    return f"https://raw.githubusercontent.com/{slug}/main/adapters/{platform}/SKILL.md"
+
+
 def skills() -> list[dict]:
     """Every shipped skill, with its full text and a paste-ready instruction.
 
@@ -105,6 +117,11 @@ def skills() -> list[dict]:
     the guide without touching the frontend. The point is self-install: the
     user copies one block and hands it to the agent, instead of placing files
     themselves.
+
+    When AGENT_WORKBENCH_REPO_SLUG is set the instruction leads with a raw URL,
+    which is shorter to hand over; the full text stays appended as an offline
+    fallback, because a peer agent with no network (or behind this machine's
+    flaky github.com route) otherwise cannot install at all.
     """
     home = Path.home()
     out: list[dict] = []
@@ -114,22 +131,25 @@ def skills() -> list[dict]:
         target_dir = home / rel_dir / folder_name
         text = src.read_text(encoding="utf-8")
         name = re.search(r"^name:\s*(.+)$", text, re.MULTILINE)
+        url = raw_url(platform)
+        fetch = (f"1. 先读 `{url}` 获取最新内容；抓不到就用下面 <SKILL> 里的副本。\n"
+                 if url else "1. 使用下面 <SKILL> 中的内容。\n")
         out.append({
             "platform": platform,
             "skill_name": name.group(1).strip() if name else folder_name,
             "target_dir": str(target_dir),
+            "raw_url": url,
             "dir_exists": target_dir.parent.is_dir(),
             "bytes": len(text.encode("utf-8")),
             "text": text,
             "instruction": (
-                f"请把下面这份 skill 安装到你自己的技能目录，不要改动内容：\n\n"
+                f"请把这份 skill 安装到你自己的技能目录，不要改动内容：\n\n"
                 f"目标目录：{target_dir}\n"
                 f"要写的文件：{target_dir / 'SKILL.md'}\n\n"
                 f"步骤：\n"
-                f"1. 如果该目录不存在就创建它；\n"
-                f"2. 把下面 <SKILL> … </SKILL> 之间的内容原样写入 SKILL.md（UTF-8，保留 front-matter）；"
-                f"如果该文件已存在，先备份成 SKILL.md.bak 再覆盖；\n"
-                f"3. 写完读一遍确认字节数一致，然后告诉我结果；\n"
+                + fetch +
+                f"2. 目录不存在就创建；文件已存在先备份成 SKILL.md.bak 再写入；\n"
+                f"3. 写完读一遍，核对字节数为 {len(text.encode('utf-8'))}，然后告诉我结果；\n"
                 f"4. 只安装，不要现在就执行里面的归档动作——等我明确说开始再开始。\n\n"
                 f"<SKILL>\n{text}</SKILL>"
             ),
