@@ -1,26 +1,36 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
 .venv/
-build/
-dist/
+venv/
 *.egg-info/
+build/work/
+build/specs/
 
-# OS
+# PyInstaller output (rebuild with: py build.py)
+dist/
+
+# Test sandboxes and scratch
+.wbtest-home/
+.wbtest-data/
+.wbtest-*/
+.tmptest/
+.smoke.out
+.port
+
+# Runtime data / secrets (never in the repo)
+token.json
+port.json
+workbench.db
+workbench.db-wal
+workbench.db-shm
+desktop_mirror.json
+*.log
+
+# OS / editors
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Editors
 .vscode/
 .idea/
 *.swp
-*~
-
-# Skill packaging output
-*.zip

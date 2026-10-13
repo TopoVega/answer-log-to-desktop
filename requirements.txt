@@ -1,0 +1,4 @@
+# 运行时依赖。核心（http.server / sqlite3 / ctypes / json）全是标准库，
+# 只有桌面窗口需要 pywebview；PyInstaller 只在打包时用。
+pywebview>=6.2,<7
+pyinstaller>=6.22

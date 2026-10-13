@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Workbench · 多平台协作工作台</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo"></span>
+    <div>
+      <h1>Agent Workbench</h1>
+      <p class="sub">多 Agent 平台协作工作台</p>
+    </div>
+  </div>
+
+  <div class="metrics" id="metrics"></div>
+
+  <div class="topright">
+    <select id="filter-platform" class="pfilt" title="只看某个平台"><option value="">全部平台</option></select>
+    <label class="me">
+      <span>我是</span>
+      <input id="me-name" placeholder="agent id" size="12">
+      <select id="me-platform"></select>
+    </label>
+    <span class="conn" id="conn"><i></i><em>连接中</em></span>
+  </div>
+</header>
+
+<div class="inboxbar">
+  <span>投递目录 <code id="inbox-path">…</code></span>
+  <span class="dot-sep">·</span>
+  <span>Markdown 导出 <code id="export-path">…</code></span>
+  <button class="ghost" id="copy-inbox" title="复制路径">复制</button>
+  <button class="ghost" id="open-inbox">打开目录</button>
+  <button class="ghost" id="show-snippet" title="给任意 MCP 客户端的接入配置">接入配置</button>
+</div>
+
+<main id="platforms" class="platforms"></main>
+
+<div class="drawer" id="drawer" hidden>
+  <div class="drawer-scrim" data-close></div>
+  <div class="drawer-panel">
+    <div class="drawer-head">
+      <h3 id="drawer-title">详情</h3>
+      <button class="ghost" data-close>关闭</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </div>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-scrim" data-close></div>
+  <div class="modal-panel">
+    <div class="drawer-head">
+      <h3 id="modal-title">接入配置</h3>
+      <button class="ghost" data-close>关闭</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

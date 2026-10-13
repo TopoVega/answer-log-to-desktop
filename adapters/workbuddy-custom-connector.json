@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-workbench": {
+      "type": "stdio",
+      "command": "D:\\AgentTeamWork\\dist\\AgentWorkbench-mcp\\AgentWorkbench-mcp.exe",
+      "args": ["mcp"]
+    }
+  }
+}
