@@ -132,6 +132,8 @@ def scan_desktop(ledger: set[str]) -> int:
         return 0
     n = 0
     for path in sorted(desk.glob("*.md")):
+        if core.is_desktop_export(path.name):
+            continue  # our own mirror — adopting it would record the turn twice
         digest = _digest(path)
         if not digest or digest in ledger or digest in _seen:
             continue
@@ -145,7 +147,9 @@ def scan_desktop(ledger: set[str]) -> int:
         try:
             meta = _sidecar_meta(path)
             payload = core.parse_inbox_markdown(
-                text, path.stem, {**{"agent_id": "workbuddy", "platform": "workbuddy"}, **meta}
+                text, path.stem,
+                {**{"agent_id": config.DESKTOP_ADOPT_AGENT,
+                    "platform": config.DESKTOP_ADOPT_PLATFORM}, **meta}
             )
             payload["source"] = "desktop-adopt"
             core.ingest_turn_log(payload, source="desktop-adopt")

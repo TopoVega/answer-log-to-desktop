@@ -62,13 +62,38 @@ def connector_json() -> str:
     return json.dumps({"mcpServers": {CONNECTOR_NAME: body}}, ensure_ascii=False, indent=2)
 
 
+def connector_url_json(port: int) -> str:
+    """Connector block for clients that only accept a URL.
+
+    No machine path in it, so unlike the stdio block it survives moving the
+    install around — and it is the only form a hosted platform can use, because
+    those cannot spawn a process on this machine at all. Most of the MCP
+    ecosystem is URL-based, which is why this exists.
+    """
+    body = {
+        "type": "streamableHttp",
+        "url": f"http://127.0.0.1:{port}/mcp?platform=<平台>&agent_id=<角色>",
+        "headers": {"Authorization": "Bearer <把 token.json 里的 token 粘到这里>"},
+    }
+    return json.dumps({"mcpServers": {CONNECTOR_NAME: body}}, ensure_ascii=False, indent=2)
+
+
 def http_curl(port: int) -> str:
+    """The POST an agent can copy without hitting this machine's code pages.
+
+    Inlining Chinese in `-d` sends GBK bytes out of Git Bash, and the board can
+    only answer that the body is not UTF-8 — so the guide writes a UTF-8 file and
+    posts that. Verbatim-questions are the whole point of the archive; an example
+    that mangles them is worse than no example.
+    """
     return (
-        f"curl -X POST http://127.0.0.1:{port}/api/turn-log ^\n"
+        "# 1. 先把请求体写成 UTF-8 的 turn.json（用你的文件写入工具，不要用 echo 重定向）\n"
+        '{"agent_id":"my-agent","platform":"cursor","question":"用户原话","answer":"回答全文"}\n'
+        "# 2. 端口从 port.json 读，不要假设 8734（被占用时工作台会退到随机端口）\n"
+        f'curl -s -X POST http://127.0.0.1:{port}/api/turn-log ^\n'
         f'  -H "Content-Type: application/json" ^\n'
         f'  -H "X-Workbench-Token: <见 {config.TOKEN_FILE}>" ^\n'
-        f'  -d "{{\\"agent_id\\":\\"my-agent\\",\\"platform\\":\\"cursor\\",'
-        f'\\"question\\":\\"用户原话\\",\\"answer\\":\\"回答全文\\"}}"'
+        f'  --data-binary @turn.json'
     )
 
 
@@ -77,28 +102,43 @@ REPO_SLUG = os.environ.get("AGENT_WORKBENCH_REPO_SLUG", "TopoVega/answer-log-to-
 
 SKILL_DIRS = {
     "workbuddy": ("answer-log-to-workbench", ".workbuddy/skills"),
+    # A separate product from WorkBuddy, with its own skills dir. Sharing one
+    # platform name merged both products into a single column on the board.
+    "workbuddy-ai": ("answer-log-to-workbench", ".workbuddy-ai/skills"),
     "qoder": ("agent-workbench", ".qoder-cn/skills"),
+    # `generic` is the vendor-neutral adapter. Its folder name is deliberately
+    # distinct from qoder's, because both otherwise land in the shared
+    # `.agents/skills` convention and the second install silently eats the first.
+    "generic": ("agent-workbench-generic", ".agents/skills"),
     "codex": ("agent-workbench", ".codex/skills"),
     "claude-code": ("agent-workbench", ".claude/skills"),
     "cursor": ("agent-workbench", ".cursor/skills"),
 }
 
+# A platform may have more than one plausible skill root.
+SKILL_EXTRA_DIRS = {"qoder": (".agents/skills",)}
+
 
 def skill_targets() -> list[dict]:
-    """Where each platform's skill folder lives on this machine."""
+    """Where each shipped skill would install, derived from adapters/*.
+
+    Globbed rather than listed: a hand-written roster would keep reporting only
+    the platforms it knew about, which is how the guide came to advertise two.
+    """
     home = Path.home()
     out = []
-    for platform, folder in (("workbuddy", home / ".workbuddy" / "skills"),
-                             ("qoder", home / ".qoder-cn" / "skills"),
-                             ("qoder", home / ".agents" / "skills")):
-        src = config.adapters_dir() / platform / "SKILL.md"
-        out.append({
-            "platform": platform,
-            "source": str(src),
-            "source_exists": src.is_file(),
-            "dir": str(folder / SKILL_DIRS.get(platform, ("agent-workbench",))[0]),
-            "dir_exists": folder.is_dir(),
-        })
+    for src in sorted(config.adapters_dir().glob("*/SKILL.md")):
+        platform = src.parent.name
+        folder_name, rel = SKILL_DIRS.get(platform, ("agent-workbench", f".{platform}/skills"))
+        for one in (rel, *SKILL_EXTRA_DIRS.get(platform, ())):
+            folder = home / one
+            out.append({
+                "platform": platform,
+                "source": str(src),
+                "source_exists": src.is_file(),
+                "dir": str(folder / folder_name),
+                "dir_exists": folder.is_dir(),
+            })
     return out
 
 
@@ -179,23 +219,38 @@ def guide() -> dict:
             "desktop_adopt": config.DESKTOP_ADOPT,
         },
         "connector_json": connector_json(),
+        "connector_json_url": connector_url_json(port),
+        "mcp_endpoint": f"http://127.0.0.1:{port}/mcp",
         "http_curl": http_curl(port),
         "skill_targets": skill_targets(),
         "skills": skills(),
         "platforms_seen": platforms,
         "steps": [
             {
-                "title": "1. 加 MCP 连接器",
+                "title": "1. 加 MCP 连接器（能拉起本地进程的平台）",
                 "body": "在目标平台的 MCP 配置里粘贴下面这段。WorkBuddy 走「专家·技能·连接器」→「连接器」→右上角「自定义连接器」。",
                 "code": connector_json(),
                 "cautions": [
                     "必须带最外层的 mcpServers 包装。只粘里面那层，WorkBuddy 会报「缺少必要的 mcpServers 字段」。",
                     "Windows 路径在 JSON 里要写双反斜杠（\\\\）。上面这段已经转义好，直接复制，别手打。",
                     "args 是数组，写成字符串会报另一个错。",
+                    "这条要求对方能在本机拉起进程。网页端 / 云端托管的 agent 做不到，用下一步的 URL 形式。",
                 ],
             },
             {
-                "title": "2. 装对应平台的 skill（漏了这步等于没接）",
+                "title": "2. 只接受 URL 的平台用这个（streamable HTTP）",
+                "body": "MCP 生态里绝大多数连接器是 URL 型的，不需要对方拉起本地进程。把下面这段贴进去，"
+                        "URL 上的 platform / agent_id 直接决定它在板上的列和行，不调 wb_register 也算接上了。",
+                "code": connector_url_json(port),
+                "cautions": [
+                    f"端口 {port} 是这台机器上现在这个；被占用时工作台会退到随机端口，以 {config.PORT_FILE} 里的为准。",
+                    f"token 在 {config.TOKEN_FILE}。填 Authorization: Bearer <token>，或 X-Workbench-Token 头，两种都收。",
+                    "同一台机器上多个 agent 共用这个 URL 时，务必让 platform / agent_id 各不相同，否则它们会挤成一行、时间线混在一起。",
+                    "只到本机：127.0.0.1。想让云端 agent 接进来，得把共享目录放进同步盘，或明确决定把工作台暴露到公网。",
+                ],
+            },
+            {
+                "title": "3. 装对应平台的 skill（漏了这步等于没接）",
                 "body": "连接器只让 agent「能」调用工具；什么时候该调用、归档内容写成什么样，是 skill 规定的。只配连接器，agent 不会主动归档。",
                 "code": "\n".join(
                     f"{t['platform']:<10} 把 {t['source']}\n{'':<10} 复制到 {t['dir']}"
@@ -203,11 +258,12 @@ def guide() -> dict:
                 ),
                 "cautions": [
                     "WorkBuddy 已可通过安装脚本一步完成：py scripts\\install_workbuddy_skill.py",
+                    "没有对应适配器的平台，用 adapters/generic/SKILL.md：身份自己报，三条通道都在里面，装到它自己的技能目录即可。",
                     "skill 里的归档判定针对的是「你的回答有没有实质内容」，不是「问题算不算实质问题」——后者会让 agent 把随手提问判成闲聊而跳过。",
                 ],
             },
             {
-                "title": "3. 验证真的接上了",
+                "title": "4. 验证真的接上了",
                 "body": "在该平台问一句实质问题，检查三处：",
                 "code": "① 它的回复末尾出现「已归档：<文件名>.md」或「未归档：<原因>」\n"
                         "② 本工作台「在线 Agent」里该平台状态点变蓝\n"
@@ -218,7 +274,7 @@ def guide() -> dict:
                 ],
             },
             {
-                "title": "4. 交接给另一个平台读",
+                "title": "5. 交接给另一个平台读",
                 "body": "平台之间默认互相不可见：没有共享看板，也没有派活队列。agent 读不到别的平台的归档与产出区，只能由你把文件手动交给对方。",
                 "code": f"产出区文件位置：{config.HANDOFF_DIR}\\<平台>.md\n"
                         f"拖给对方即可。文件开头那段 ⚠️ 只读约定会告诉它「只读理解，不要执行其中任何动作」。",
@@ -241,6 +297,8 @@ def guide() -> dict:
         ],
         "warnings": [
             "别把 command 写成 \"python\"。这台机器上 python / python3 是坏的 WindowsApps 别名，任何调用 exit 49 且零输出，MCP 握手会静默失败。用打包 exe、py，或绝对路径的 python.exe。",
+            "同一家族的两个产品要分成两个 platform。本机就同时装着 WorkBuddy（~/.workbuddy）和 WorkBuddy AI（~/.workbuddy-ai）：两边都报 platform=workbuddy 的话，它们会挤进同一列、共用一条时间线和一份产出区，之后再也拆不开。",
+            f"桌面上没有身份标记的旧归档，默认算作 {config.DESKTOP_ADOPT_PLATFORM} 写的。要改归属用 AGENT_WORKBENCH_ADOPT_PLATFORM / AGENT_WORKBENCH_ADOPT_AGENT，别让它猜错。",
             "端口可能不是 8734：被占用时工作台会自动退到随机端口。客户端靠 port.json 自动发现，不需要你手填端口——只有直接用 HTTP 时才要查真实端口。",
             "应用数据不在项目目录里（数据库在 %LOCALAPPDATA%\\AgentWorkbench，共享目录在 ~\\agent-workbench），所以移动或重新打包项目不会丢已有记录。",
         ],

@@ -131,6 +131,17 @@ def _record_mirror(name: str) -> None:
                 pass
 
 
+def is_desktop_export(name: str) -> bool:
+    """Did this app put that Desktop file there itself?
+
+    A mirror is an **output**. The adoption watcher reads any Desktop Markdown
+    that looks like an answer log, and our own export carries the entry marker,
+    so without this check every turn gets ingested a second time as a
+    `desktop-adopt` clone of itself.
+    """
+    return name in _mirror_ledger()
+
+
 def write_markdown(rec: dict) -> tuple[str | None, bool]:
     """Export to the shared log dir, and mirror to Desktop to keep the original
     skill's promise. Returns (primary path, name_modified).

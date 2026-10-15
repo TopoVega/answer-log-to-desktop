@@ -389,6 +389,24 @@ meta = core.apply_supersede(w2["id"], [w1["id"]])
 check("retroactive supersede returns a result", meta and meta["supersedes"] == [w1["id"]])
 check("retroactive supersede rebuilds the dossier", "用 8080。" not in (dossier.read("qoder") or "").split("被推翻的记录")[0])
 
+# The timeline keeps history, so an overturned row must say so — otherwise a
+# corrected duplicate looks exactly like a real second turn.
+_tl = {r["id"]: r for r in db.list_turn_logs(limit=50)}
+check("the timeline keeps the overturned row but marks it",
+      _tl[w1["id"]]["superseded"] is True and _tl[w2["id"]]["superseded"] is False,
+      str({k: v.get("superseded") for k, v in _tl.items()}))
+check("the mark names what replaced it", _tl[w1["id"]]["superseded_by"] == w2["id"],
+      str(_tl[w1["id"]].get("superseded_by")))
+_ui_js = (ROOT / "workbench" / "ui" / "app.js").read_text(encoding="utf-8")
+_ui_css = (ROOT / "workbench" / "ui" / "style.css").read_text(encoding="utf-8")
+check("the UI renders the overturned state", "l.superseded" in _ui_js and "已被推翻" in _ui_js)
+check("overturned rows are visually set apart",
+      ".card.log.retired" in _ui_css and ".retired-tag" in _ui_css)
+check("a platform with only a handoff document still gets a column",
+      "platformNames" in _ui_js and "for (const d of (state.dossiers || []))" in _ui_js)
+check("the platform metric counts the same set the columns use",
+      "platformNames().size" in _ui_js)
+
 print("\n== cross-platform visibility is off by default ==")
 
 def mcp_session(msgs):
@@ -511,7 +529,11 @@ httpd3, _t3 = server.serve(0)
 port2 = httpd3.server_address[1]
 s, g = http2("GET", "/api/setup")
 check("GET /api/setup", s == 200 and g.get("ok"), f"{s}")
-check("guide has the four steps", len(g.get("steps", [])) == 4, str(len(g.get("steps", []))))
+check("guide covers both connector shapes plus skill, verify, handoff",
+      len(g.get("steps", [])) >= 5
+      and any("streamable HTTP" in st["title"] for st in g["steps"])
+      and any("拉起本地进程" in st["title"] for st in g["steps"]),
+      str([st["title"] for st in g.get("steps", [])]))
 conn = json.loads(g["connector_json"])
 check("connector JSON carries the mcpServers wrapper", list(conn) == ["mcpServers"], str(list(conn)))
 launch = conn["mcpServers"]["agent-workbench"]
@@ -821,6 +843,64 @@ check("legacy literal still accepted", inbox.looks_like_answer_log("## 一、本
 check("a random user note is NOT adopted",
       not inbox.looks_like_answer_log("# 会议纪要\n\n讨论了排期问题\n"))
 
+print("\n== our own Desktop mirror must not return as a second turn ==")
+# Both AGENT_WORKBENCH_DESKTOP and ADOPT_DESKTOP default to on, and the mirrored
+# file carries our entry marker, so the watcher used to read its own export back
+# in: every turn landed twice, once as `desktop-adopt`.
+_desk = ROOT / ".wbtest-desktop"
+shutil.rmtree(_desk, ignore_errors=True)
+_desk.mkdir()
+_real_get_desktop = config.get_desktop_dir
+_real_export, _real_adopt = config.DESKTOP_EXPORT, config.DESKTOP_ADOPT
+config.get_desktop_dir = lambda: _desk
+config.DESKTOP_EXPORT = True
+config.DESKTOP_ADOPT = True  # off for the whole suite: without this the mirror
+                             # check would "pass" only because adoption is disabled
+try:
+    fresh()
+    (config.DATA_ROOT / "desktop_mirror.json").write_text("[]", encoding="utf-8")
+    (config.DATA_ROOT / "adopted.json").unlink(missing_ok=True)
+    core._MIRROR_LEDGER = set()
+    core.ingest_turn_log({"agent_id": "mirror", "platform": "mirrortest",
+                          "question": "镜像不能自我摄取", "answer": "只应有一条"}, source="http")
+    mirrored = [p.name for p in _desk.glob("*.md")]
+    check("the turn really was mirrored to the Desktop", mirrored == ["镜像不能自我摄取.md"], str(mirrored))
+    adopted = [inbox.scan_desktop(inbox._load_ledger()) for _ in range(3)]
+    rows = [r for r in db.list_turn_logs(limit=50) if r["question"] == "镜像不能自我摄取"]
+    check("the mirror is never adopted back", adopted == [0, 0, 0] and len(rows) == 1,
+          f"adopted={adopted} rows={len(rows)}")
+    check("no desktop-adopt clone was created",
+          [r["source"] for r in rows] == ["http"], str([r["source"] for r in rows]))
+    (_desk / "旧版技能的日志.md").write_text(
+        "# 旧版技能的日志\n\n## 一、本次做了什么\n- 别的程序写的\n\n## 二、回答内容\n历史\n",
+        encoding="utf-8", newline="\n")
+    check("a foreign Desktop file is still adopted",
+          inbox.scan_desktop(inbox._load_ledger()) == 1
+          and any(r["question"] == "旧版技能的日志" for r in db.list_turn_logs(limit=50)),
+          f"ledger={len(inbox._load_ledger())} seen={len(inbox._seen)} "
+          f"files={[p.name for p in _desk.glob('*.md')]} "
+          f"rows={[(r['question'], r['source']) for r in db.list_turn_logs(limit=50)]}")
+    _legacy = [r for r in db.list_turn_logs(limit=50) if r["question"] == "旧版技能的日志"][0]
+    check("an unmarked legacy file is attributed to the configured default, not a hardcoded name",
+          _legacy["platform"] == config.DESKTOP_ADOPT_PLATFORM == "workbuddy", _legacy["platform"])
+    _ap, _aa = config.DESKTOP_ADOPT_PLATFORM, config.DESKTOP_ADOPT_AGENT
+    config.DESKTOP_ADOPT_PLATFORM, config.DESKTOP_ADOPT_AGENT = "workbuddy-ai", "workbuddy-ai"
+    try:
+        (_desk / "另一个产品写的旧归档.md").write_text(
+            "# 另一个产品写的旧归档\n\n## 一、本次做了什么\n- x\n\n## 二、回答内容\ny\n",
+            encoding="utf-8", newline="\n")
+        inbox.scan_desktop(inbox._load_ledger())
+        _other = [r for r in db.list_turn_logs(limit=50) if r["question"] == "另一个产品写的旧归档"]
+        check("overriding the adoption identity files it under the other product",
+              _other and _other[0]["platform"] == "workbuddy-ai"
+              and _other[0]["agent_id"] == "workbuddy-ai", str(_other)[:160])
+    finally:
+        config.DESKTOP_ADOPT_PLATFORM, config.DESKTOP_ADOPT_AGENT = _ap, _aa
+finally:
+    config.get_desktop_dir = _real_get_desktop
+    config.DESKTOP_EXPORT, config.DESKTOP_ADOPT = _real_export, _real_adopt
+    shutil.rmtree(_desk, ignore_errors=True)
+
 print("\n== guide ships copy-paste skill installers ==")
 httpd5, _t5 = server.serve(0)
 port2 = httpd5.server_address[1]
@@ -858,7 +938,322 @@ check("instruction leads with the URL but keeps the offline copy",
       all(k["raw_url"] in k["instruction"] and k["text"] in k["instruction"] for k in skills))
 check("instruction states the expected byte count for verification",
       all(str(k["bytes"]) in k["instruction"] for k in skills))
+
+print("\n== generic adapter: vendor-neutral, and its channels really work ==")
+import re as _re  # noqa: E402
+
+GEN = (ROOT / "adapters" / "generic" / "SKILL.md").read_text(encoding="utf-8")
+FLAT = " ".join(GEN.split())  # the prose wraps mid-sentence; compare unwrapped
+
+# The bug this adapter removes: a hand-written per-vendor skill pins one identity,
+# so a second session on the same tool archives into the same row.
+gen_ids = set(_re.findall(r'"agent_id"\s*:\s*"([^"]*)"', GEN))
+check("generic carries no live identity, only a placeholder", gen_ids == {"<yours>"}, str(sorted(gen_ids)))
+check("generic makes you declare identity before archiving",
+      "## 0. Identity" in GEN and "<platform>-<role>" in GEN and "Do **not** reuse" in FLAT)
+check("generic warns that sharing an agent_id merges timelines",
+      "indistinguishable on the board" in FLAT)
+check("generic keeps the archive-test fix", "about your answer, not their question" in FLAT)
+check("generic keeps the confirm-each-turn fix", "未归档：" in GEN and "Never leave the slot empty" in FLAT)
+check("generic keeps corrections as replacement, not append",
+      "supersedes" in GEN and "stops appearing in the dossier" in FLAT)
+check("generic states cross-platform reads are refused", "refused**, not filtered" in FLAT)
+check("generic admits a cloud-hosted agent reaches none of its channels",
+      "cloud-hosted" in FLAT and "127.0.0.1" in GEN)
+check("generic says port.json presence means the board is live",
+      "**`port.json` existing is how you know the board is live**" in FLAT)
+check("generic names the python alias trap without telling you to hunt for the script",
+      "exits 49" in FLAT and "not go hunting" in FLAT)
+check("generic skill_targets is derived, so it lists the new adapter",
+      any(t["platform"] == "generic" and t["source_exists"] for t in setup_mod.skill_targets()),
+      str([t["platform"] for t in setup_mod.skill_targets()]))
+_gk = next(k for k in skills if k["platform"] == "generic")
+_qk = next(k for k in skills if k["platform"] == "qoder")
+check("generic does not install on top of the qoder adapter",
+      _gk["target_dir"] != _qk["target_dir"], f'{_gk["target_dir"]} vs {_qk["target_dir"]}')
+
+# Isolation is the design; a skill that advertises "everyone on the board can
+# see this" teaches the reader to defeat it.
+for k in skills:
+    _flat = " ".join(k["text"].split())
+    check(f"{k['platform']}: never claims peers read it automatically",
+          "visible to every other agent platform" not in _flat)
+    check(f"{k['platform']}: says handover happens by the user dragging a file",
+          "the user" in _flat and "drags" in _flat)
+_wbf = " ".join(next(k for k in skills if k["platform"] == "workbuddy")["text"].split())
+check("workbuddy skill uses the MCP connector it is configured with",
+      "wb_register" in _wbf and "wb_post_log" in _wbf)
+check("workbuddy skill no longer pins one agent_id onto every chat",
+      "--agent-id workbuddy" not in _wbf and "<你的 agent_id>" in _wbf)
+check("workbuddy skill explains why a shared agent_id is lossy",
+      "become one timeline and cannot be reset apart" in _wbf)
+check("workbuddy skill sends WorkBuddy AI to its own adapter",
+      "workbuddy-ai" in _wbf and "adapters/workbuddy-ai/SKILL.md" in _wbf)
+
+# Two products of the same family on one machine must not share a column.
+_wb = next(k for k in skills if k["platform"] == "workbuddy")
+_wai = next((k for k in skills if k["platform"] == "workbuddy-ai"), None)
+check("WorkBuddy AI ships its own adapter", _wai is not None, str([k["platform"] for k in skills]))
+check("the two products install into different skill dirs",
+      _wai and ".workbuddy-ai" in _wai["target_dir"] and _wai["target_dir"] != _wb["target_dir"],
+      str(_wai and _wai["target_dir"]))
+_waf = " ".join(_wai["text"].split())
+check("WorkBuddy AI archives under platform=workbuddy-ai",
+      "--platform workbuddy-ai" in _wai["text"] and "--agent-id workbuddy-ai" in _wai["text"])
+check("WorkBuddy AI is told not to borrow the other product's name",
+      "Do not use `workbuddy`." in _waf and "already happened once" in _waf)
+check("WorkBuddy AI's dossier path matches its platform",
+      "handoff/workbuddy-ai.md" in _waf)
+check("WorkBuddy AI can attach by URL without a local process",
+      "streamableHttp" in _wai["text"] and "/mcp?platform=workbuddy-ai" in _wai["text"])
+
+# The installer is what actually puts these files where each product reads them;
+# if it knows about fewer products than adapters/, the collision comes back.
+import importlib.util as _ilu  # noqa: E402
+
+_ispec = _ilu.spec_from_file_location("inst_wb", ROOT / "scripts" / "install_workbuddy_skill.py")
+_inst = _ilu.module_from_spec(_ispec)
+_ispec.loader.exec_module(_inst)
+_family = {p for p in by_plat if p.startswith("workbuddy")}
+check("the installer covers every workbuddy-family adapter", set(_inst.TARGETS) == _family,
+      f"{sorted(_inst.TARGETS)} vs {sorted(_family)}")
+check("each install target maps to a real adapter and the matching skills dir",
+      all((ROOT / "adapters" / a / "SKILL.md").is_file()
+          and setup_mod.SKILL_DIRS.get(p, (None, f"{d}/skills"))[1] == f"{d}/skills"
+          for p, (d, a) in _inst.TARGETS.items()), str(_inst.TARGETS))
+check("the installer defaults to all products, not just one",
+      '"all"' in (ROOT / "scripts" / "install_workbuddy_skill.py").read_text(encoding="utf-8")
+      and 'default="all"' in (ROOT / "scripts" / "install_workbuddy_skill.py").read_text(encoding="utf-8"))
+
+# Building while the packaged app is open deletes dist/<name> first, hits a
+# locked DLL halfway through, and leaves an install that starts but serves zero
+# skills. It happened twice, so the check itself needs a test.
+_bspec = _ilu.spec_from_file_location("wbbuild", ROOT / "build.py")
+_bld = _ilu.module_from_spec(_bspec)
+_bspec.loader.exec_module(_bld)
+_real_run = _bld.subprocess.run
+try:
+    def fake(out):
+        return lambda *a, **k: type("R", (), {"stdout": out})()
+    _bld.subprocess.run = fake('"Image Name","PID","Session","Session#","Mem Usage"\r\n'
+                              '"AgentWorkbench.exe","21792","Console","1","12,345 K"\r\n'
+                              '"chrome.exe","9","Console","1","9 K"\r\n')
+    check("an open packaged app blocks the build, whatever the name case",
+          _bld._running_targets() == ["agentworkbench.exe"], str(_bld._running_targets()))
+    _bld.subprocess.run = fake('"Image Name","PID"\r\n"AgentWorkbench-mcp.exe","22904"\r\n')
+    check("an MCP child process blocks it too",
+          _bld._running_targets() == ["agentworkbench-mcp.exe"], str(_bld._running_targets()))
+    _bld.subprocess.run = fake('"Image Name","PID"\r\n"chrome.exe","9"\r\n')
+    check("an idle machine does not block the build", _bld._running_targets() == [],
+          str(_bld._running_targets()))
+finally:
+    _bld.subprocess.run = _real_run
+
+fresh()
+config.ensure_dirs()
+TURN = {"agent_id": "trae-review", "platform": "trae", "question": "generic 通道 C",
+        "actions": "- 读了 `x.py`", "answer": "通道 C 的回复全文。", "status": "done"}
+(config.INBOX_DIR / "1_generic_json.json").write_text(
+    json.dumps(TURN, ensure_ascii=False), encoding="utf-8", newline="\n")
+(config.INBOX_DIR / "1_generic_md.md").write_text(
+    "# generic 通道 C 的 markdown 版\n\n## 一、本次做了什么\n- 改了 `y.md`\n\n"
+    "## 二、回答内容\n标题模板的回复。\n\n"
+    '<!-- agent-workbench:entry:v1 {"agent_id":"trae-md","platform":"trae"} -->\n',
+    encoding="utf-8", newline="\n")
+(config.INBOX_DIR / "1_generic_naked.md").write_text(
+    "# 忘了写身份的归档\n\n## 一、本次做了什么\n- 什么都没记\n\n## 二、回答内容\n正文。\n",
+    encoding="utf-8", newline="\n")
+inbox.scan_inbox()
+
+_by_q = {r["question"]: r for r in db.list_turn_logs(limit=99)}
+jrow = _by_q.get("generic 通道 C")
+mrow = _by_q.get("generic 通道 C 的 markdown 版")
+nrow = _by_q.get("忘了写身份的归档")
+check("channel C: the documented JSON shape ingests with its identity",
+      jrow and jrow["agent_id"] == "trae-review" and jrow["platform"] == "trae", str(jrow)[:120])
+check("channel C: markdown heading template parses into sections",
+      mrow and "改了 `y.md`" in (mrow["actions"] or "") and "标题模板的回复。" in (mrow["answer"] or ""),
+      str(mrow)[:160])
+check("channel C: the marker, not the prose, carries identity",
+      mrow and mrow["agent_id"] == "trae-md", str(mrow and mrow["agent_id"]))
+check("channel C: an unmarked drop really does become a row nobody owns",
+      nrow and nrow["agent_id"] == "file-drop", str(nrow and nrow["agent_id"]))
+check("channel C: a brand-new platform gets its own dossier file",
+      (config.HANDOFF_DIR / "trae.md").is_file())
+_dossier = (config.HANDOFF_DIR / "trae.md").read_text(encoding="utf-8") if (config.HANDOFF_DIR / "trae.md").is_file() else ""
+check("the new dossier holds only the new platform's turns",
+      "generic 通道 C" in _dossier and "忘了写身份的归档" not in _dossier, _dossier[:120])
+
+s, b = http2("POST", "/api/turn-log", {"agent_id": "trae-review", "platform": "trae",
+                                       "question": "generic 通道 B", "answer": "通道 B 的回复全文。"})
+check("channel B: the documented POST is accepted", s == 201 and b.get("ok"), f"{s} {str(b)[:120]}")
+check("channel B: it answers with the file it wrote, as documented",
+      bool(b.get("path")) and Path(b["path"]).is_file(), str(b)[:120])
+check("channel B: the turn is on the board under the declared identity",
+      any(r["agent_id"] == "trae-review" and r["question"] == "generic 通道 B"
+          for r in db.list_turn_logs(limit=99)))
+# No body: the handler rejects before reading it, and an undrained request body
+# makes Windows answer the client with a connection reset instead of the 401.
+_noauth = urllib.request.Request(f"http://127.0.0.1:{port2}/api/turn-log", None, method="POST")
+_noauth.add_header("Content-Type", "application/json")
+_noauth.add_header("Connection", "close")
+try:
+    with urllib.request.urlopen(_noauth, timeout=10) as _r:
+        code = _r.status
+except urllib.error.HTTPError as _e:
+    code = _e.code
+check("channel B: no token is a 401, not a silent no-op as the skill claims", code == 401, str(code))
+check("channel B: a dead port cannot be mistaken for success",
+      "port.json" in FLAT and "posted to a dead port and believed the response" in FLAT)
+check("channel B: the skill refuses to inline Chinese in -d",
+      "Do **not** inline the JSON" in FLAT and "--data-binary @turn.json" in GEN)
+
+
+def post_raw(body: bytes):
+    req = urllib.request.Request(f"http://127.0.0.1:{port2}/api/turn-log", data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Workbench-Token", token)
+    req.add_header("Connection", "close")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8", "replace"))
+
+
+# A Windows shell hands `-d '中文'` over in GBK; the board must say which fix, not
+# just "invalid JSON", or the agent retries the identical command forever.
+s, b = post_raw(json.dumps({**TURN, "question": "代码页自测"}, ensure_ascii=False).encode("gbk"))
+check("a GBK-coded body is refused with the encoding named", s == 400 and "UTF-8" in str(b), f"{s} {str(b)[:120]}")
+check("the refusal names the fix the skill teaches", "data-binary" in str(b), str(b)[:160])
+s, b = post_raw(json.dumps({**TURN, "question": "代码页自测"}, ensure_ascii=False).encode("utf-8"))
+check("the same body in UTF-8 is accepted", s == 201 and b.get("ok"), f"{s} {str(b)[:120]}")
+_http_fb = next(f for f in setup_mod.guide()["fallbacks"] if "HTTP" in f["how"])
+check("the guide's own HTTP snippet posts a UTF-8 file, not an inline -d",
+      "data-binary" in _http_fb["code"] and "-d '{\"" not in _http_fb["code"], _http_fb["code"][:120])
 server.stop(httpd5)
+
+print("\n== MCP over HTTP: any URL-only client can attach ==")
+httpd6, _t6 = server.serve(0)
+mport = httpd6.server_address[1]
+server.MCP_SESSIONS.clear()
+
+
+def mcp(path_qs, msg=None, sid=None, auth="token", method="POST", accept=None):
+    data = json.dumps(msg, ensure_ascii=False).encode("utf-8") if msg is not None else None
+    req = urllib.request.Request(f"http://127.0.0.1:{mport}{path_qs}", data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if accept:
+        req.add_header("Accept", accept)
+    if auth == "token":
+        req.add_header("X-Workbench-Token", token)
+    elif auth == "bearer":
+        req.add_header("Authorization", f"Bearer {token}")
+    if sid:
+        req.add_header("Mcp-Session-Id", sid)
+    req.add_header("Connection", "close")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read().decode("utf-8")
+            return r.status, r.headers.get("Mcp-Session-Id"), (json.loads(body) if body.strip() else None)
+    except urllib.error.HTTPError as e:
+        b = e.read().decode("utf-8", "replace")
+        try:
+            parsed = json.loads(b)
+        except json.JSONDecodeError:
+            parsed = b
+        return e.code, e.headers.get("Mcp-Session-Id"), parsed
+
+
+fresh()
+INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "url-client", "version": "1"}}}
+s, sid_a, body = mcp("/mcp?platform=httpmcp&agent_id=httpmcp-1", INIT)
+check("initialize over HTTP returns a session id header", s == 200 and bool(sid_a), f"{s} {sid_a}")
+check("initialize negotiates the protocol", body["result"]["protocolVersion"] == "2025-06-18"
+      and body["result"]["serverInfo"]["name"] == "agent-workbench", str(body)[:120])
+s, _, body = mcp("/mcp", {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid=sid_a)
+check("a notification is accepted with 202 and no body", s == 202 and body is None, f"{s} {body}")
+s, _, body = mcp("/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, sid=sid_a)
+check("tools/list over HTTP", s == 200 and len(body["result"]["tools"]) == 7, str(body)[:120])
+
+# The URL carries the identity, so a client that never calls wb_register still
+# archives under a real column instead of "unknown".
+s, _, body = mcp("/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                          "params": {"name": "wb_post_log",
+                                     "arguments": {"question": "URL 预绑身份", "answer": "第一轮。"}}}, sid=sid_a)
+check("URL-bound identity is used without wb_register",
+      s == 200 and body["result"]["structuredContent"].get("archived") is True, str(body)[:160])
+row = [r for r in db.list_turn_logs(limit=20) if r["question"] == "URL 预绑身份"]
+check("the turn landed under the URL's platform and agent",
+      row and row[0]["platform"] == "httpmcp" and row[0]["agent_id"] == "httpmcp-1", str(row)[:160])
+
+# Two clients, one process: identity must stay per-session or isolation is gone.
+s, sid_b, _ = mcp("/mcp?platform=otherplat&agent_id=otherplat-1", INIT)
+check("a second client gets its own session", s == 200 and sid_b and sid_b != sid_a, f"{s} {sid_b}")
+for _ in range(2):  # interleave, so a leaked global identity would show up
+    mcp("/mcp", {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                 "params": {"name": "wb_post_log", "arguments": {"question": f"交错 {_}", "answer": "x"}}}, sid=sid_a)
+    mcp("/mcp", {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                 "params": {"name": "wb_post_log", "arguments": {"question": f"对方 {_}", "answer": "y"}}}, sid=sid_b)
+mine = {r["platform"] for r in db.list_turn_logs(limit=50) if r["question"].startswith("交错")}
+theirs = {r["platform"] for r in db.list_turn_logs(limit=50) if r["question"].startswith("对方")}
+check("interleaved sessions keep their own identity", mine == {"httpmcp"} and theirs == {"otherplat"},
+      f"mine={mine} theirs={theirs}")
+s, _, body = mcp("/mcp", {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                          "params": {"name": "wb_get_dossier", "arguments": {"platform": "httpmcp"}}}, sid=sid_b)
+txt = body["result"]["content"][0]["text"]
+check("HTTP session B still cannot read session A's dossier",
+      body["result"]["isError"] is True and "拒绝" in txt, txt[:120])
+s, _, body = mcp("/mcp", {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                          "params": {"name": "wb_read_board", "arguments": {}}}, sid=sid_b)
+board_txt = body["result"]["content"][0]["text"]
+check("HTTP board reads stay scoped to the caller's platform",
+      "对方 0" in board_txt and "交错 0" not in board_txt, board_txt[:160])
+
+s, _, body = mcp("/mcp", {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}, sid="does-not-exist")
+check("an unknown session id is a 404 telling the client to re-initialize",
+      s == 404 and body["error"]["code"] == -32000, f"{s} {str(body)[:120]}")
+s, _, body = mcp("/mcp", INIT, auth="none")
+check("initialize without a token is refused", s == 401, str(s))
+s, sid_c, body = mcp("/mcp?platform=bearerplat", INIT, auth="bearer")
+check("Authorization: Bearer is accepted, as URL-only clients expect",
+      s == 200 and bool(sid_c) and body["result"]["serverInfo"]["name"] == "agent-workbench", str(body)[:120])
+s, _, body = mcp("/mcp", None, auth="token", method="GET")
+check("GET /mcp in a browser describes the endpoint",
+      s == 200 and body["transport"] == "mcp-streamable-http" and body["endpoint"] == "/mcp", str(body)[:160])
+s, _, _ = mcp("/mcp", None, auth="token", method="GET", accept="text/event-stream")
+check("GET /mcp answers 405 to a client that wants an SSE stream we do not serve", s == 405, str(s))
+s, _, body = mcp("/mcp", None, sid=sid_c, auth="token", method="DELETE")
+check("DELETE ends the session", s == 200 and body["terminated"] is True, str(body)[:120])
+s, _, _ = mcp("/mcp", {"jsonrpc": "2.0", "id": 8, "method": "tools/list"}, sid=sid_c)
+check("a deleted session can no longer call tools", s == 404, str(s))
+s, _, body = mcp("/mcp", json.loads('{"jsonrpc":"2.0","id":9,"method":"tools/list"}'), sid=sid_a)
+check("the surviving session is unaffected by the other's DELETE", s == 200 and len(body["result"]["tools"]) == 7, str(s))
+
+g6 = setup_mod.guide()
+url_block = g6["connector_json_url"]
+_url_srv = json.loads(url_block)["mcpServers"]["agent-workbench"]
+check("the guide ships a URL connector block",
+      _url_srv["type"] == "streamableHttp" and "/mcp?platform=" in _url_srv["url"], url_block[:160])
+check("the URL connector's values carry no machine-specific path",
+      _url_srv["url"].startswith("http://127.0.0.1:") and "\\" not in url_block, url_block[:200])
+check("the URL connector says where the token comes from",
+      "Bearer" in url_block and "token.json" in url_block, url_block[:200])
+_stdio_srv = json.loads(g6["connector_json"])["mcpServers"]["agent-workbench"]
+check("the stdio block is the one that needs a machine path",
+      _stdio_srv["type"] == "stdio" and "\\" in _stdio_srv["command"], _stdio_srv["command"][:120])
+check("the guide explains which connector to pick",
+      any("URL" in st["title"] for st in g6["steps"]) and any("拉起本地进程" in st["title"] for st in g6["steps"]),
+      str([st["title"] for st in g6["steps"]]))
+check("the guide tells you a hosted agent cannot reach localhost",
+      any("公网" in c or "同步盘" in c for st in g6["steps"] for c in st.get("cautions", [])))
+check("the guide warns that two products of one family need two platform names",
+      any("挤进同一列" in w for w in g6["warnings"]), str([w[:30] for w in g6["warnings"]]))
+check("the guide says where unmarked Desktop files get attributed",
+      any("ADOPT_PLATFORM" in w for w in g6["warnings"]))
+server.stop(httpd6)
 
 print("\n== UTF-8 stdout (the bug that broke the original) ==")
 out = subprocess.run([sys.executable, "-c",

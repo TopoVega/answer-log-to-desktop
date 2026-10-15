@@ -18,6 +18,9 @@ Windows 桌面端工作台。每个 agent 平台各自维护一份「内容产�
 |---|---|---|
 | WorkBuddy | `https://raw.githubusercontent.com/<owner>/agent-workbench/main/adapters/workbuddy/SKILL.md` | `~/.workbuddy/skills/answer-log-to-workbench/SKILL.md` |
 | Qoder | `https://raw.githubusercontent.com/<owner>/agent-workbench/main/adapters/qoder/SKILL.md` | `~/.qoder-cn/skills/agent-workbench/SKILL.md` |
+| 其它任何平台 | `https://raw.githubusercontent.com/<owner>/agent-workbench/main/adapters/generic/SKILL.md` | 该工具自己的技能目录，文件名 `agent-workbench-generic/SKILL.md` |
+
+通用适配器不带任何平台身份：`platform` 和 `agent_id` 由那个 agent 在会话开始时自己声明，所以同一平台上可以并存多个 agent 而不互相覆盖。新写一个平台适配器 = 往 `adapters/<平台>/SKILL.md` 放一个文件，接入配置界面会自动列出来。
 
 对那个 agent 说一句：
 
@@ -25,7 +28,9 @@ Windows 桌面端工作台。每个 agent 平台各自维护一份「内容产�
 
 工作台界面的「接入配置 → 安装 Skill」里也有同样的地址和一段现成的安装指令可以复制。
 
-### 2. 加 MCP 连接器
+### 2. 加 MCP 连接器（可选，但只有这条路能实时绑定身份）
+
+能拉起本地进程的平台（stdio）：
 
 ```json
 {
@@ -39,7 +44,25 @@ Windows 桌面端工作台。每个 agent 平台各自维护一份「内容产�
 }
 ```
 
+只接受 URL 的平台（streamable HTTP，**不含任何机器路径**）：
+
+```json
+{
+  "mcpServers": {
+    "agent-workbench": {
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:8734/mcp?platform=<平台>&agent_id=<角色>",
+      "headers": { "Authorization": "Bearer <token.json 里的 token>" }
+    }
+  }
+}
+```
+
+URL 上的 `platform` / `agent_id` 在 `initialize` 时就绑定身份，所以**不调 `wb_register` 也算接上了** —— 对只会填一个 URL 的平台来说，这是唯一不需要它理解任何约定的接法。端口以 `%LOCALAPPDATA%\AgentWorkbench\port.json` 为准（8734 被占用时会自动退到随机端口）。
+
 只配连接器不装 skill，agent 能调用但不知道该在什么时候调用；只装 skill 不配连接器，它知道该做但调不到工具。**两步都要。**
+
+stdio 要求客户端能在本机拉起进程 —— 网页端 / 云端托管的 agent 做不到，那种只能走 URL 连接器、HTTP 或文件投递，而且三条都只到本机。
 
 ## 三条接入通道
 
@@ -47,9 +70,11 @@ Windows 桌面端工作台。每个 agent 平台各自维护一份「内容产�
 
 | 通道 | 给谁 | 说明 |
 |---|---|---|
-| MCP | 任何 MCP-capable 客户端 | 12 → 7 个工具，身份在 `wb_register` 时绑定整条连接 |
-| HTTP | hook / 脚本 / CLI | `POST /api/turn-log`，localhost + 会话 token |
-| 文件投递 | 只会写文件的平台 | 往 `~/agent-workbench/inbox/` 丢 `.md` / `.json`，启动时自动摄取 |
+| MCP | 任何 MCP 客户端 | 7 个工具；stdio（能拉起本地进程）或 streamable HTTP `/mcp`（只填 URL）。HTTP 下身份按连接隔离，URL 上就能预绑定 |
+| HTTP | hook / 脚本 / CLI | `POST /api/turn-log`，localhost + 会话 token；**请求体要写成 UTF-8 文件再用 `--data-binary @turn.json`**，Windows shell 内联中文会按本地代码页发出去，服务端只能报"不是 UTF-8 JSON" |
+| 文件投递 | 只会写文件的平台 | 往 `~/agent-workbench/inbox/` 丢 `.md` / `.json`；运行中约 3 秒摄取一次，没运行则在下次启动时摄取 |
+
+三条通道都只到**本机**（`127.0.0.1` 和 `~/agent-workbench`）。纯云端托管的 agent 一条都够不着 —— 那种情况只能把共享目录放进同步盘，或者故意把工作台暴露到公网。
 
 ## MCP 工具
 
@@ -100,6 +125,7 @@ py build.py                                      # 打包出 dist/ 下两个 exe
 - **跨平台隔离是防手滑，不是防恶意。** 对端平台和你共用同一个 Windows 账户，想绕过可以直接读那些文件。真正的决策点是用户手动拖文件。
 - **「每轮自动归档」依赖模型自觉。** 工作台提供「有心跳但久未归档」检测器把漏归档变得可见，但检测不等于阻止。真要阻止需要平台侧的回合钩子。
 - 平台之间没有任何推送通道，交接全靠人。
+- **桌面镜像和桌面摄取默认同时开着**，所以「本程序自己导出到桌面的文件」必须被摄取环节跳过 —— 那些文件带着 entry marker，长得和待摄取的归档一模一样，不跳过就会把每一轮记成两条。跳过依据是 `desktop_mirror.json` 这份「我只写我自己创建的文件」账本。
 
 ## License
 

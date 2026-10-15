@@ -1,16 +1,26 @@
-"""MCP server for the Agent Workbench (stdio, newline-delimited JSON-RPC 2.0).
+"""MCP server for the Agent Workbench (stdio **and** streamable-HTTP JSON-RPC 2.0).
 
 This is the layer that makes the workbench platform-agnostic: Qoder, WorkBuddy,
 Claude Code, Codex, Cursor and anything else that speaks MCP attaches with a
 one-line config, no bespoke plugin per vendor.
 
-Every agent platform is a separate process, so this module is spawned fresh per
-client and talks to the board through bridge.py (HTTP to the running app, with
-a direct-SQLite fallback).
+Two transports, because clients split into two camps:
+
+  * **stdio** (`main()`): the client spawns us as a process. One process = one
+    client = one identity, which is why identity used to be a single module global.
+  * **HTTP** (`new_session()` + `handle(msg, session)`, served by server.py at
+    `/mcp`): the client only gives us a URL. Many hosted platforms cannot spawn
+    a local process at all, so without this transport they cannot attach,
+    however good the skill is. Here one process serves many clients, so identity
+    lives in a per-session dict rather than in the module.
+
+Both talk to the board through bridge.py (HTTP to the running app, with a
+direct-SQLite fallback).
 """
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sys
@@ -132,43 +142,73 @@ def _err(msg: str) -> dict:
     return {"content": [{"type": "text", "text": f"error: {msg}"}], "isError": True}
 
 
-# Identity is bound once per MCP session, not asserted on every call. Each MCP
-# client is a separate process this server spawns, so whatever wb_register
-# declared holds for the rest of that connection.
+# Identity is bound once per MCP session, not asserted on every call. Under
+# stdio the session is this whole process; over HTTP it is one dict per client,
+# and a ContextVar picks the right one without threading it through every tool.
 #
 # This is an accident guard, not a security boundary: a peer platform shares
 # this user account and can read the SQLite file or handoff folder directly.
 # The real control is that the user drags a dossier over by hand.
-SESSION: dict = {"agent_id": None, "platform": None}
+_STDIO_SESSION: dict = {"agent_id": None, "platform": None}
+_SESSION: contextvars.ContextVar[dict] = contextvars.ContextVar("mcp_session", default=_STDIO_SESSION)
+
+
+def _sess() -> dict:
+    return _SESSION.get()
+
+
+def new_session(hint: dict | None = None) -> dict:
+    """Identity for one HTTP connection.
+
+    `hint` lets the URL carry a platform up front
+    (`/mcp?platform=trae&agent_id=trae-review`), so a client that never calls
+    wb_register still archives under a real column rather than `unknown`.
+    """
+    sess: dict = {"agent_id": None, "platform": None}
+    if hint:
+        if hint.get("platform"):
+            sess["platform"] = str(hint["platform"])[:40]
+        if hint.get("agent_id"):
+            sess["agent_id"] = str(hint["agent_id"])[:60]
+    return sess
+
+
+def handle(msg: dict, session: dict | None = None) -> str | None:
+    """Run one JSON-RPC message under `session`; stdio passes None."""
+    token = _SESSION.set(_STDIO_SESSION if session is None else session)
+    try:
+        return _handle(msg)
+    finally:
+        _SESSION.reset(token)
 
 
 def _own_platform() -> str | None:
-    return SESSION.get("platform")
+    return _sess().get("platform")
 
 
 def _need_identity() -> dict | None:
-    if SESSION.get("platform"):
+    if _sess().get("platform"):
         return None
     return {"error": "先调用 wb_register 声明你的 agent_id 和 platform，再读取看板。"}
 
 
 def _t_register(a: dict) -> dict:
-    SESSION["agent_id"] = a["agent_id"]
-    SESSION["platform"] = a.get("platform") or "unknown"
+    _sess()["agent_id"] = a["agent_id"]
+    _sess()["platform"] = a.get("platform") or "unknown"
     agent = bridge.register(
-        a["agent_id"], SESSION["platform"], a.get("display_name"),
+        a["agent_id"], _sess()["platform"], a.get("display_name"),
         a.get("capabilities"), "idle", a.get("note"),
     )
     return {"registered": True, "agent": agent, "app_reachable": bridge.probe_app(),
-            "visibility": f"你只能读到 platform={SESSION['platform']} 的归档与档案；"
+            "visibility": f"你只能读到 platform={_sess()['platform']} 的归档与档案；"
                           "其他平台的内容由用户手动拖给你看。"}
 
 
 def _t_post_log(a: dict) -> dict:
     if not a.get("platform"):
         a["platform"] = _own_platform() or "unknown"
-    if not a.get("agent_id") and SESSION.get("agent_id"):
-        a["agent_id"] = SESSION["agent_id"]
+    if not a.get("agent_id") and _sess().get("agent_id"):
+        a["agent_id"] = _sess()["agent_id"]
     if not a.get("platform") and a.get("agent_id"):
         with db.session() as conn:
             row = conn.execute("SELECT platform FROM agents WHERE agent_id=?", (a["agent_id"],)).fetchone()
@@ -182,7 +222,7 @@ def _t_read_board(a: dict) -> dict:
     blocked = _need_identity()
     if blocked:
         return blocked
-    return bridge.board(limit=int(a.get("limit") or 15), scope=SESSION["platform"])
+    return bridge.board(limit=int(a.get("limit") or 15), scope=_sess()["platform"])
 
 
 def _t_find_agents(a: dict) -> dict:
@@ -198,7 +238,7 @@ def _t_find_agents(a: dict) -> dict:
         return base
 
     return {
-        "you": {"agent_id": SESSION.get("agent_id"), "platform": me},
+        "you": {"agent_id": _sess().get("agent_id"), "platform": me},
         "your_platform_peers": [shape(x, True) for x in agents if x["online"] and x["platform"] == me],
         "other_platforms_present": sorted({x["platform"] for x in agents if x["online"] and x["platform"] != me}),
         "note": "其他平台只暴露名字，看不到它们做了什么——那是用户手动交接的内容。",
@@ -221,7 +261,7 @@ def _t_list_dossiers(a: dict) -> dict:
     blocked = _need_identity()
     if blocked:
         return blocked
-    mine = [d for d in bridge.list_dossiers() if d["platform"] == SESSION["platform"]]
+    mine = [d for d in bridge.list_dossiers() if d["platform"] == _sess()["platform"]]
     return {"dossiers": mine,
             "note": "只有你自己平台的档案。别的平台档案由用户手动拖给对方读。"}
 
@@ -230,9 +270,9 @@ def _t_get_dossier(a: dict) -> dict:
     blocked = _need_identity()
     if blocked:
         return blocked
-    wanted = a.get("platform") or SESSION["platform"]
-    if wanted != SESSION["platform"]:
-        return {"error": (f"拒绝：你以 {SESSION['platform']} 身份接入，不能读取 {wanted} 的内容产出区。"
+    wanted = a.get("platform") or _sess()["platform"]
+    if wanted != _sess()["platform"]:
+        return {"error": (f"拒绝：你以 {_sess()['platform']} 身份接入，不能读取 {wanted} 的内容产出区。"
                           "跨平台交接由用户把 handoff/<平台>.md 手动交给对方。")}
     out = bridge.get_dossier(wanted, bool(a.get("refresh")))
     if not out or not out.get("ok"):
@@ -347,7 +387,7 @@ def main() -> int:
             sys.stdout.flush()
             continue
         try:
-            reply = _handle(msg)
+            reply = handle(msg)
         except Exception as exc:
             reply = _fault(msg.get("id"), -32603, f"internal error: {exc}")
         if reply:

@@ -299,9 +299,19 @@ def list_turn_logs(
     params.append(limit)
     with session() as conn:
         rows = _rows(conn, sql, tuple(params))
+        retired = retired_ids(conn)
+    winners: dict[str, str] = {}
     for r in rows:
         r["artifacts"] = json.loads(r["artifacts"] or "[]")
         r["supersedes"] = json.loads(r["supersedes"] or "[]")
+        for loser in r["supersedes"]:
+            winners[loser] = r["id"]
+    for r in rows:
+        # The timeline deliberately keeps overturned rows — history lives here,
+        # not in the dossier — but unmarked, a corrected duplicate is
+        # indistinguishable from a real second turn.
+        r["superseded"] = r["id"] in retired
+        r["superseded_by"] = winners.get(r["id"])
     return rows
 
 

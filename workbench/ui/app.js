@@ -84,7 +84,7 @@ function dossierActions(d) {
 function feedItem(l) {
   const open = state.expanded.has(l.id);
   return `
-  <article class="card log" data-log="${l.id}">
+  <article class="card log${l.superseded ? ' retired' : ''}" data-log="${l.id}">
     <button class="log-q" data-toggle="${l.id}">
       <b>${esc(l.question)}</b>
       <span class="chev">${open ? '收起' : '展开'}</span>
@@ -93,6 +93,7 @@ function feedItem(l) {
       <span>${esc(l.agent_id)}</span><span>${clock(l.created_at)}</span>
       <span>${STATUS_LABEL[l.status] || esc(l.status)}</span>
       <span class="src">${esc(l.source)}</span>
+      ${l.superseded ? `<span class="retired-tag" title="已被后续修正推翻，不再计入内容产出区${l.superseded_by ? `；取代它的是 ${esc(l.superseded_by)}` : ''}">已被推翻</span>` : ''}
       ${l.name_modified ? '<span title="问题含文件系统非法字符，已替换为全角等价字符">文件名已适配</span>' : ''}
     </div>
     ${open ? `
@@ -151,6 +152,19 @@ function platformColumn(plat, agents, dossierMeta, logs) {
   </section>`;
 }
 
+/** Platforms the board should show a column for.
+ *
+ *  A handoff document is evidence a platform is onboarded even when nothing is
+ *  live right now: counting only agents+logs made a platform vanish the moment
+ *  its last agent row was re-labelled, which reads as "where did it go". */
+function platformNames() {
+  const s = new Set();
+  for (const a of (state.board?.agents || [])) s.add(a.platform || 'unknown');
+  for (const l of (state.allLogs || [])) s.add(l.platform || 'unknown');
+  for (const d of (state.dossiers || [])) s.add(d.platform || 'unknown');
+  return s;
+}
+
 function renderPlatforms() {
   const b = state.board;
   const byPlatform = new Map();
@@ -158,6 +172,7 @@ function renderPlatforms() {
 
   for (const a of (b.agents || [])) add(a.platform || 'unknown').agents.push(a);
   for (const l of (state.allLogs || [])) add(l.platform || 'unknown').logs.push(l);
+  for (const p of platformNames()) add(p);
 
   let plats = [...byPlatform.keys()].sort();
   if (state.filter) plats = plats.filter(p => p === state.filter);
@@ -189,7 +204,7 @@ function renderMetrics() {
   const b = state.board;
   if (!b) return;
   const online = b.agents.filter(a => a.online).length;
-  const platforms = new Set(b.agents.map(a => a.platform)).size;
+  const platforms = platformNames().size;
   const leaked = b.agents.filter(a => a.suspected_missed_archive).length;
   $('#metrics').innerHTML = [
     ['在线 Agent', `${online}<i>/${b.agents.length}</i>`],
@@ -303,7 +318,7 @@ async function showSetup() {
       <span>已接入平台 <b>${g.platforms_seen.length ? esc(g.platforms_seen.join('、')) : '暂无'}</b></span>
     </div>
     <nav class="tabs" id="setup-tabs">
-      <button data-tab="steps" class="on">接入四步</button>
+      <button data-tab="steps" class="on">接入步骤</button>
       <button data-tab="skills">安装 Skill</button>
       <button data-tab="alt">其他方式</button>
       <button data-tab="paths">路径与环境变量</button>

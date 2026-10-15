@@ -7,8 +7,9 @@ venv/
 build/work/
 build/specs/
 
-# PyInstaller output (rebuild with: py build.py)
+# PyInstaller output (rebuild with: .venv\Scripts\python.exe build.py)
 dist/
+dist-staging/
 
 # Test sandboxes and scratch
 .wbtest-home/

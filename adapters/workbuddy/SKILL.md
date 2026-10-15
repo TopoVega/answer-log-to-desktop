@@ -12,15 +12,33 @@ metadata:
   category: productivity
   output: workbench-board + desktop-markdown
   replaces: answer-log-to-desktop
-version: 0.2.0
+version: 0.3.0
 license: MIT
 ---
 
 # Answer Log to Workbench
 
 Successor to `answer-log-to-desktop`. Same user-facing contract — one Markdown
-file per turn, named after the raw question — plus the turn becomes visible to
-every other agent platform on the board.
+file per turn, named after the raw question — plus the turn lands on a local
+board you can hand over. Other platforms do **not** see it automatically: the
+user decides which dossier goes to which agent, by dragging the file over.
+
+## Identity
+
+`platform` is always `workbuddy`. `agent_id` is **this session's** id:
+
+- one WorkBuddy expert at a time → `workbuddy`
+- several in parallel (different chats, same task) → `workbuddy-<role>`, e.g.
+  `workbuddy-legal`, `workbuddy-drafts`
+
+**Do not use `workbuddy-ai`.** That is a different product on this machine (its
+skills live in `~/.workbuddy-ai/skills`, yours in `~/.workbuddy/skills`) and it
+has its own column. If you are running inside WorkBuddy AI, install and follow
+`adapters/workbuddy-ai/SKILL.md` instead of this file.
+
+Two chats that share an `agent_id` become one timeline and cannot be reset
+apart, so ask the user which it is the first time you archive, then keep the
+same value for the rest of the conversation.
 
 ## Activation
 
@@ -60,9 +78,25 @@ Silent archiving is disabled on purpose.
 
 ## How to archive
 
+### Prefer the MCP connector when it is connected
+
+If an `agent-workbench` MCP server is available, use its tools — no token, no
+port discovery, no `py`-versus-`python` luck:
+
+| Tool | When |
+|------|------|
+| `wb_register` | once, at the start — binds your `platform` for every later read |
+| `wb_post_log` | after **every** completed turn |
+| `wb_supersede` | when something you already posted turned out wrong |
+| `wb_get_dossier` | your own platform's handoff document, when asked what you have |
+
+Then skip the CLI below; use it only if the connector is missing or a call fails.
+
+### CLI fallback
+
 ```bash
 py "<workbench>/scripts/post_turn_log.py" \
-  --agent-id workbuddy --platform workbuddy \
+  --agent-id <你的 agent_id> --platform workbuddy \
   --question "<用户原话，逐字>" \
   --actions "- 读了 `path` —— 目的：…
 - 改了 `path` —— 改动：…

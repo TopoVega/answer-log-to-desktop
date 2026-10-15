@@ -12,8 +12,10 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -21,6 +23,11 @@ from urllib.parse import parse_qs, urlparse
 from . import config, core, db
 
 _UI_CACHE: dict[str, tuple[bytes, str, float]] = {}
+
+# MCP over HTTP: many clients share this process, so identity cannot be a module
+# global. Keyed by the Mcp-Session-Id we hand out at `initialize`.
+MCP_SESSIONS: dict[str, dict] = {}
+_MCP_TTL = 6 * 3600
 
 
 def _load_ui(name: str) -> tuple[bytes, str] | None:
@@ -74,6 +81,14 @@ class Handler(BaseHTTPRequestHandler):
                 raw = json.dumps({"text": raw.decode("utf-8", "replace")}).encode("utf-8")
         try:
             data = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            # On Windows this is nearly always a shell that sent the body in the
+            # local code page (GBK here), not a broken client. Name the fix, or
+            # the agent re-runs the same command forever and calls it a mystery.
+            raise core.IngestError(
+                f"body 不是 UTF-8 JSON: {exc}. 中文别用 -d 内联传参；"
+                "把请求体存成 UTF-8 文件，再 --data-binary @turn.json"
+            ) from exc
         except Exception as exc:
             raise core.IngestError(f"body 不是合法 JSON: {exc}") from exc
         return data if isinstance(data, dict) else {"value": data}
@@ -81,7 +96,14 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self, mutating: bool) -> bool:
         if not mutating:
             return True
-        given = self.headers.get("X-Workbench-Token") or (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
+        given = (self.headers.get("X-Workbench-Token")
+                 or (parse_qs(urlparse(self.path).query).get("token") or [""])[0])
+        if not given:
+            # MCP clients that only take a URL usually speak Bearer, not a
+            # custom header, so accept it too rather than making them impossible.
+            auth = self.headers.get("Authorization") or ""
+            if auth.lower().startswith("bearer "):
+                given = auth[7:].strip()
         return bool(given) and given == self.token
 
     # ---------- routing ----------
@@ -93,8 +115,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send(204, b"", "text/plain", {"Access-Control-Allow-Origin": "*",
-                                             "Access-Control-Allow-Headers": "Content-Type,X-Workbench-Token",
-                                             "Access-Control-Allow-Methods": "GET,POST,OPTIONS"})
+                                             "Access-Control-Allow-Headers": "Content-Type,X-Workbench-Token,Authorization,Mcp-Session-Id",
+                                             "Access-Control-Expose-Headers": "Mcp-Session-Id",
+                                             "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS"})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._dispatch("DELETE")
 
     def _dispatch(self, method: str) -> None:
         url = urlparse(self.path)
@@ -110,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
             if matched is None and path.startswith("/api/"):
                 return self._json(404, {"ok": False, "error": f"no route {method} {path}"})
             if matched is not None:
-                if not self._authorized(method == "POST"):
+                if not self._authorized(method in ("POST", "DELETE")):
                     return self._json(401, {"ok": False, "error": "bad or missing X-Workbench-Token"})
                 seg = [s for s in path.split("/") if s]
                 return matched(self, seg, parse_qs(url.query), params)
@@ -127,6 +153,72 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _h_health(h: "Handler", seg, qs, params=None):
         h._json(200, core.health())
+
+    # ---------- MCP over HTTP ----------
+    def _mcp_session(self, create: bool, qs: dict) -> tuple[str | None, dict | None]:
+        """This connection's identity, minted on `initialize`.
+
+        Sessions expire so a client that connects once and never returns cannot
+        pile up unbounded state in the app process.
+        """
+        sid = self.headers.get("Mcp-Session-Id")
+        now = time.time()
+        for dead in [k for k, v in MCP_SESSIONS.items() if now - v["seen"] > _MCP_TTL]:
+            MCP_SESSIONS.pop(dead, None)
+        ent = MCP_SESSIONS.get(sid) if sid else None
+        if ent:
+            ent["seen"] = now
+            return sid, ent["session"]
+        if not create:
+            return None, None
+        from . import mcp_server
+
+        sess = mcp_server.new_session({"platform": (qs.get("platform") or [None])[0],
+                                       "agent_id": (qs.get("agent_id") or [None])[0]})
+        sid = secrets.token_urlsafe(16)
+        MCP_SESSIONS[sid] = {"session": sess, "seen": now, "created": now}
+        return sid, sess
+
+    @staticmethod
+    def _h_mcp_get(h: "Handler", seg, qs, params=None):
+        # A spec-strict client GETs the endpoint expecting a server->client SSE
+        # stream. We do not offer one, and the spec says answer 405 in that case
+        # — a 200 with JSON would look like a stream that immediately ended.
+        if "text/event-stream" in (h.headers.get("Accept") or ""):
+            return h._send(405, b"", "text/plain", {"Allow": "POST, DELETE"})
+        h._json(200, {"ok": True, "transport": "mcp-streamable-http", "endpoint": "/mcp",
+                      "session_header": "Mcp-Session-Id",
+                      "auth": f"X-Workbench-Token 或 Authorization: Bearer <见 {config.TOKEN_FILE}>",
+                      "identity": "initialize 时可用 /mcp?platform=<平台>&agent_id=<id> 预绑定身份，"
+                                  "也可以之后调 wb_register"})
+
+    @staticmethod
+    def _h_mcp_post(h: "Handler", seg, qs, params=None):
+        from . import mcp_server
+
+        msg = h._body()
+        if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+            return h._json(400, {"ok": False, "error": "需要一个 JSON-RPC 2.0 消息体"})
+        sid, sess = h._mcp_session(create=msg.get("method") == "initialize", qs=qs)
+        if sess is None:
+            # 404 is what the transport spec means here: "start a new session".
+            return h._json(404, {"jsonrpc": "2.0", "id": msg.get("id"), "error": {
+                "code": -32000, "message": "Mcp-Session-Id 缺失或已过期，请重新 initialize"}})
+        try:
+            reply = mcp_server.handle(msg, sess)
+        except Exception as exc:
+            reply = json.dumps({"jsonrpc": "2.0", "id": msg.get("id"),
+                                "error": {"code": -32603, "message": f"internal error: {exc}"}},
+                               ensure_ascii=False)
+        if reply is None:  # a notification: accepted, nothing to answer
+            return h._send(202, b"", "application/json", {"Mcp-Session-Id": sid})
+        h._send(200, reply.encode("utf-8"), "application/json; charset=utf-8",
+                {"Mcp-Session-Id": sid}, no_store=True)
+
+    @staticmethod
+    def _h_mcp_delete(h: "Handler", seg, qs, params=None):
+        sid = h.headers.get("Mcp-Session-Id")
+        h._json(200, {"ok": True, "terminated": MCP_SESSIONS.pop(sid, None) is not None})
 
     @staticmethod
     def _h_board(h: "Handler", seg, qs, params=None):
@@ -375,6 +467,9 @@ def _register_routes() -> None:
         ("POST", "/api/turn-log"): Handler._h_post_turn_log,
         ("POST", "/api/agents"): Handler._h_register,
         ("POST", "/api/agents/:id/heartbeat"): Handler._h_heartbeat,
+        ("GET", "/mcp"): Handler._h_mcp_get,
+        ("POST", "/mcp"): Handler._h_mcp_post,
+        ("DELETE", "/mcp"): Handler._h_mcp_delete,
     }
 
 

@@ -48,6 +48,12 @@ HANDOFF_DIR = SHARED_ROOT / "handoff"
 DESKTOP_EXPORT = os.environ.get("AGENT_WORKBENCH_DESKTOP", "1") not in ("0", "", "no")
 # Adopt legacy answer-log .md files already on the Desktop (marker-gated).
 DESKTOP_ADOPT = os.environ.get("AGENT_WORKBENCH_ADOPT_DESKTOP", "1") not in ("0", "", "no")
+# A Desktop file with no marker of its own carries no identity. The skill that
+# wrote the legacy ones was WorkBuddy's, so that is the default attribution —
+# but this machine may host several products, and guessing wrong silently files
+# one product's work under another's column. Override rather than guess.
+DESKTOP_ADOPT_AGENT = os.environ.get("AGENT_WORKBENCH_ADOPT_AGENT", "workbuddy")
+DESKTOP_ADOPT_PLATFORM = os.environ.get("AGENT_WORKBENCH_ADOPT_PLATFORM", "workbuddy")
 
 
 def ensure_dirs() -> None:
