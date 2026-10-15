@@ -110,13 +110,11 @@ def main() -> int:
     st, tree = api("POST", f"/repos/{OWNER}/{REPO}/git/trees", {"base_tree": base_sha, "tree": tree_items})
     print(f"新 tree  : {tree['sha'][:8]}")
 
-    message = ("feat: per-platform handoff workbench as a Windows desktop app\n\n"
-               "Replaces the single-file answer-log skill. Each agent platform keeps one\n"
-               "living handoff document that the user drags to another platform by hand;\n"
-               "cross-platform reads are refused at the MCP layer rather than filtered.\n\n"
-               "Removes the superseded root SKILL.md and scripts/save_answer_log.py -\n"
-               "the WorkBuddy skill now lives at adapters/workbuddy/SKILL.md.\n\n"
-               "203 self-checks in tests/smoke.py; package with py build.py.")
+    # The message must come from the commit being pushed. It used to be a literal
+    # from the very first push, so every later push silently re-described that one
+    # and the remote tip's message described code that was no longer there.
+    message = git("log", "-1", "--format=%B", head) or (
+        "feat: per-platform handoff workbench as a Windows desktop app")
     st, commit = api("POST", f"/repos/{OWNER}/{REPO}/git/commits",
                      {"message": message, "tree": tree["sha"], "parents": [base_sha]})
     print(f"新 commit: {commit['sha'][:8]}  parent={base_sha[:8]}")
